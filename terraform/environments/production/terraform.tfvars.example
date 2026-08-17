@@ -1,0 +1,33 @@
+###############################################################################
+# Production terraform.tfvars.example
+# Copy to terraform.tfvars and fill in real values
+# NEVER commit terraform.tfvars to git
+###############################################################################
+
+project_name = "athennian"
+aws_region   = "us-east-1"
+github_org   = "your-github-org"
+github_repo  = "athennian-devops-lab"
+
+acm_certificate_arn = "arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/CERTIFICATE_ID"
+app_ami_id          = "ami-0abcdef1234567890"   # Replace with latest Packer AMI
+mongodb_ami_id      = "ami-0abcdef1234567890"
+
+slack_webhook_url     = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+alert_email_addresses = ["oncall@yourcompany.com"]
+
+# Example customers — demonstrates for_each onboarding
+customers = {
+  acme = {
+    name                = "Acme Corp"
+    db_password         = "CHANGE_ME_STRONG_PASSWORD"
+    data_retention_days = 365
+    enable_backups      = true
+  }
+  globex = {
+    name                = "Globex Corporation"
+    db_password         = "CHANGE_ME_STRONG_PASSWORD_2"
+    data_retention_days = 730
+    enable_backups      = true
+  }
+}

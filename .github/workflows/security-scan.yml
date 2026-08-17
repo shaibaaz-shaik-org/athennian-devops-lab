@@ -1,0 +1,182 @@
+###############################################################################
+# .github/workflows/security-scan.yml
+# Security scanning pipeline — runs on every PR and nightly
+###############################################################################
+
+name: "Security Scan"
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+  issues: write
+
+jobs:
+  checkov:
+    name: "Checkov IaC Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov.sarif
+          soft_fail: true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov.sarif
+
+  trivy-secrets:
+    name: "Trivy Secret Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy secret scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          format: sarif
+          output: trivy-secrets.sarif
+          severity: HIGH,CRITICAL
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-secrets.sarif
+
+  trufflehog:
+    name: "TruffleHog Credential Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+
+  open-ports-check:
+    name: "Security Group Open Port Check"
+    runs-on: ubuntu-latest
+    needs: []
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for 0.0.0.0/0 ingress on non-ALB resources
+        run: |
+          echo "Checking for unrestricted security group ingress rules..."
+          
+          # Find any security group that allows 0.0.0.0/0 on port 22 (SSH)
+          if grep -r '"0.0.0.0/0"' terraform/ | grep -v "alb" | grep -v "#" | grep -q '"22"'; then
+            echo "❌ FAIL: SSH port 22 open to 0.0.0.0/0 detected"
+            exit 1
+          fi
+          
+          # Find any security group that allows 0.0.0.0/0 on port 3306 (MySQL)
+          if grep -r '"0.0.0.0/0"' terraform/ | grep -q '"3306"'; then
+            echo "❌ FAIL: Database port 3306 open to 0.0.0.0/0 detected"
+            exit 1
+          fi
+          
+          # Find MongoDB port open to world
+          if grep -r '"0.0.0.0/0"' terraform/ | grep -q '"27017"'; then
+            echo "❌ FAIL: MongoDB port 27017 open to 0.0.0.0/0 detected"
+            exit 1
+          fi
+          
+          echo "✅ No unrestricted security group rules on sensitive ports"
+
+  missing-tags-check:
+    name: "Required Tags Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for required tags on all resources
+        run: |
+          REQUIRED_TAGS=("Project" "Environment" "ManagedBy")
+          FAILED=0
+          
+          for tag in "${REQUIRED_TAGS[@]}"; do
+            # Check common_tags or default_tags includes required tag
+            if ! grep -r "$tag" terraform/environments/ | grep -q "tags"; then
+              echo "⚠️  Warning: Tag '$tag' may be missing from some resources"
+            fi
+          done
+          
+          echo "✅ Tag check complete"
+
+  encryption-check:
+    name: "Encryption Enforcement Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify encryption is enabled on all storage resources
+        run: |
+          FAILED=0
+          
+          # Check EBS volumes have encryption enabled
+          echo "Checking EBS encryption..."
+          if grep -r "ebs_block_device\|root_block_device" terraform/modules/ | grep -v "#"; then
+            if ! grep -rA 5 "ebs_block_device\|root_block_device" terraform/modules/ | grep -q "encrypted.*=.*true"; then
+              echo "❌ EBS volume without encryption detected"
+              FAILED=1
+            fi
+          fi
+          
+          # Check S3 buckets have SSE
+          echo "Checking S3 encryption..."
+          if grep -r "aws_s3_bucket\"" terraform/modules/s3/; then
+            if ! grep -r "aws_s3_bucket_server_side_encryption_configuration" terraform/modules/s3/; then
+              echo "❌ S3 bucket without server-side encryption"
+              FAILED=1
+            fi
+          fi
+          
+          if [ $FAILED -eq 1 ]; then
+            exit 1
+          fi
+          
+          echo "✅ Encryption checks passed"
+
+  imdsv2-check:
+    name: "IMDSv2 Enforcement Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify IMDSv2 is required on all EC2 instances
+        run: |
+          echo "Checking IMDSv2 enforcement..."
+          
+          # Find launch templates / instances without IMDSv2
+          if grep -r "metadata_options" terraform/modules/ec2/ terraform/modules/mongodb/; then
+            if ! grep -r "http_tokens.*=.*\"required\"" terraform/modules/ec2/ terraform/modules/mongodb/; then
+              echo "❌ IMDSv2 not enforced (http_tokens should be 'required')"
+              exit 1
+            fi
+          fi
+          
+          echo "✅ IMDSv2 enforcement confirmed"

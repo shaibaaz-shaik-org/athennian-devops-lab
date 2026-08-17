@@ -1,0 +1,161 @@
+###############################################################################
+# .github/workflows/terraform-apply.yml
+# Production deployment workflow — merge to main triggers apply with approval
+###############################################################################
+
+name: "Terraform Apply"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy"
+        required: true
+        type: choice
+        options: [dev, staging, production]
+      confirm:
+        description: "Type DEPLOY to confirm"
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+  deployments: write
+
+env:
+  TF_VERSION: "1.6.6"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Deploy Dev — automatic, no approval required
+  # ---------------------------------------------------------------------------
+  deploy-dev:
+    name: "Deploy → dev"
+    runs-on: ubuntu-latest
+    environment: dev
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: github-actions-apply-dev
+
+      - name: terraform init
+        working-directory: terraform/environments/dev
+        run: terraform init
+
+      - name: terraform apply
+        working-directory: terraform/environments/dev
+        run: |
+          terraform apply \
+            -var-file="terraform.tfvars" \
+            -auto-approve \
+            -input=false
+
+  # ---------------------------------------------------------------------------
+  # Deploy Staging — automatic after dev succeeds
+  # ---------------------------------------------------------------------------
+  deploy-staging:
+    name: "Deploy → staging"
+    runs-on: ubuntu-latest
+    environment: staging
+    needs: deploy-dev
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_STAGING }}
+          aws-region: us-east-1
+          role-session-name: github-actions-apply-staging
+
+      - name: terraform init
+        working-directory: terraform/environments/staging
+        run: terraform init
+
+      - name: terraform apply
+        working-directory: terraform/environments/staging
+        run: |
+          terraform apply \
+            -var-file="terraform.tfvars" \
+            -auto-approve \
+            -input=false
+
+  # ---------------------------------------------------------------------------
+  # Deploy Production — REQUIRES MANUAL APPROVAL
+  # Configure environment protection rules in GitHub repo settings:
+  # Settings → Environments → production → Required reviewers
+  # ---------------------------------------------------------------------------
+  deploy-production:
+    name: "Deploy → production (REQUIRES APPROVAL)"
+    runs-on: ubuntu-latest
+    environment: production   # This gate requires manual approval in GitHub
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_PRODUCTION }}
+          aws-region: us-east-1
+          role-session-name: github-actions-apply-production
+
+      - name: terraform init
+        working-directory: terraform/environments/production
+        run: terraform init
+
+      # Final plan before apply — confirms nothing changed since PR plan
+      - name: terraform plan (pre-apply confirmation)
+        working-directory: terraform/environments/production
+        run: |
+          terraform plan \
+            -var-file="terraform.tfvars" \
+            -detailed-exitcode \
+            -out=tfplan
+
+      - name: terraform apply
+        working-directory: terraform/environments/production
+        run: |
+          terraform apply \
+            -input=false \
+            tfplan
+
+      - name: Post deployment notification to Slack
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            Terraform production deployment ${{ job.status }}
+            Triggered by: ${{ github.actor }}
+            Commit: ${{ github.sha }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

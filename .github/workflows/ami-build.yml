@@ -1,0 +1,106 @@
+###############################################################################
+# .github/workflows/ami-build.yml
+# Packer AMI build workflow — triggered on changes to packer/ directory
+###############################################################################
+
+name: "Build Application AMI"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packer/**"
+      - "scripts/**"
+  workflow_dispatch:
+    inputs:
+      base_ami:
+        description: "Base AMI ID (leave blank for latest Amazon Linux 2023)"
+        required: false
+
+permissions:
+  id-token: write
+  contents: write  # Write AMI ID back to repo
+
+env:
+  PACKER_VERSION: "1.9.4"
+
+jobs:
+  build-ami:
+    name: "Build Application AMI"
+    runs-on: ubuntu-latest
+    environment: dev  # Build in dev account, promote to prod
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_DEV }}
+          aws-region: us-east-1
+          role-session-name: packer-ami-build
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+        with:
+          version: ${{ env.PACKER_VERSION }}
+
+      - name: Packer init
+        working-directory: packer/
+        run: packer init application-image.pkr.hcl
+
+      - name: Packer validate
+        working-directory: packer/
+        run: |
+          packer validate \
+            -var "git_sha=${{ github.sha }}" \
+            application-image.pkr.hcl
+
+      - name: Packer build
+        id: build
+        working-directory: packer/
+        run: |
+          packer build \
+            -var "git_sha=${{ github.sha }}" \
+            -var "build_number=${{ github.run_number }}" \
+            -machine-readable \
+            application-image.pkr.hcl | tee packer-output.txt
+          
+          # Extract AMI ID from packer output
+          AMI_ID=$(grep 'artifact,0,id' packer-output.txt | cut -d: -f2)
+          echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
+          echo "Built AMI: $AMI_ID"
+
+      - name: Update AMI ID in tfvars
+        run: |
+          # Update the AMI ID in production tfvars
+          sed -i "s|app_ami_id.*=.*\"ami-.*\"|app_ami_id = \"${{ steps.build.outputs.ami_id }}\"|" \
+            terraform/environments/production/terraform.tfvars || true
+          sed -i "s|app_ami_id.*=.*\"ami-.*\"|app_ami_id = \"${{ steps.build.outputs.ami_id }}\"|" \
+            terraform/environments/staging/terraform.tfvars || true
+
+      - name: Commit updated AMI ID
+        uses: EndBug/add-and-commit@v9
+        with:
+          add: "terraform/environments/*/terraform.tfvars"
+          message: "ci: update app_ami_id to ${{ steps.build.outputs.ami_id }} [skip ci]"
+          default_author: github_actions
+
+      - name: Notify Slack — AMI ready
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              "text": "✅ New Application AMI Built",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  { "title": "AMI ID", "value": "${{ steps.build.outputs.ami_id }}", "short": true },
+                  { "title": "Git SHA", "value": "${{ github.sha }}", "short": true },
+                  { "title": "Next Step", "value": "Run terraform-apply workflow to deploy", "short": false }
+                ]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

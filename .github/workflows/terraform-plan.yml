@@ -1,0 +1,231 @@
+###############################################################################
+# .github/workflows/terraform-plan.yml
+# Pull Request workflow — validates and plans Terraform changes
+###############################################################################
+
+name: "Terraform Plan"
+
+on:
+  pull_request:
+    branches: [main, staging]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-*.yml"
+
+permissions:
+  id-token: write      # Required for OIDC
+  contents: read
+  pull-requests: write  # Post plan as PR comment
+
+env:
+  TF_VERSION: "1.6.6"
+  TFLINT_VERSION: "v0.50.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Determine which environment changed
+  # ---------------------------------------------------------------------------
+  detect-environment:
+    name: "Detect Changed Environment"
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.detect.outputs.environment }}
+      tf_dir: ${{ steps.detect.outputs.tf_dir }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect environment from changed files
+        id: detect
+        run: |
+          # Check which environment directory changed
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          
+          if echo "$CHANGED" | grep -q "terraform/environments/production"; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "tf_dir=terraform/environments/production" >> $GITHUB_OUTPUT
+          elif echo "$CHANGED" | grep -q "terraform/environments/staging"; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "tf_dir=terraform/environments/staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "tf_dir=terraform/environments/dev" >> $GITHUB_OUTPUT
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Format check
+  # ---------------------------------------------------------------------------
+  terraform-fmt:
+    name: "Terraform Format"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform fmt check
+        run: terraform fmt -check -recursive terraform/
+        # Fails if any .tf file isn't properly formatted
+        # Fix locally with: terraform fmt -recursive terraform/
+
+  # ---------------------------------------------------------------------------
+  # Validate — checks HCL syntax without AWS credentials
+  # ---------------------------------------------------------------------------
+  terraform-validate:
+    name: "Terraform Validate"
+    runs-on: ubuntu-latest
+    needs: detect-environment
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform init (local backend for validation)
+        working-directory: ${{ needs.detect-environment.outputs.tf_dir }}
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        working-directory: ${{ needs.detect-environment.outputs.tf_dir }}
+        run: terraform validate
+
+  # ---------------------------------------------------------------------------
+  # TFLint — catch common Terraform mistakes
+  # ---------------------------------------------------------------------------
+  tflint:
+    name: "TFLint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+
+      - name: Init TFLint
+        run: tflint --init
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Run TFLint
+        run: tflint --recursive terraform/
+
+  # ---------------------------------------------------------------------------
+  # Checkov — security and compliance scanning
+  # ---------------------------------------------------------------------------
+  checkov:
+    name: "Checkov Security Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+          soft_fail: false
+          skip_check: >-
+            CKV_AWS_144,
+            CKV_AWS_18
+          # CKV_AWS_144: Cross-region replication (cost trade-off, documented)
+          # CKV_AWS_18: ALB access logs (enabled, false positive in some versions)
+
+      - name: Upload Checkov results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+
+  # ---------------------------------------------------------------------------
+  # Terraform Plan — runs against real AWS (requires OIDC)
+  # ---------------------------------------------------------------------------
+  terraform-plan:
+    name: "Terraform Plan"
+    runs-on: ubuntu-latest
+    needs:
+      - detect-environment
+      - terraform-fmt
+      - terraform-validate
+      - tflint
+      - checkov
+    environment: ${{ needs.detect-environment.outputs.environment }}-plan
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Authenticate with AWS via OIDC (no long-lived credentials)
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: github-actions-plan
+
+      - name: terraform init
+        working-directory: ${{ needs.detect-environment.outputs.tf_dir }}
+        run: terraform init
+
+      - name: terraform plan
+        id: plan
+        working-directory: ${{ needs.detect-environment.outputs.tf_dir }}
+        run: |
+          terraform plan \
+            -var-file="terraform.tfvars" \
+            -out=tfplan \
+            -detailed-exitcode \
+            2>&1 | tee plan-output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+      - name: Save plan output
+        run: |
+          PLAN=$(cat ${{ needs.detect-environment.outputs.tf_dir }}/plan-output.txt)
+          echo "PLAN<<EOF" >> $GITHUB_ENV
+          echo "${PLAN}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      # Post plan as PR comment — engineers see exactly what will change
+      - name: Post plan as PR comment
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const output = `#### Terraform Plan — \`${{ needs.detect-environment.outputs.environment }}\`
+            
+            **Format**: \`${{ job.steps.fmt.outcome }}\`
+            **Validate**: \`${{ job.steps.validate.outcome }}\`
+            **Plan**: \`${{ steps.plan.outputs.exitcode == '0' && 'No Changes' || steps.plan.outputs.exitcode == '2' && 'Changes Detected' || 'Error' }}\`
+            
+            <details><summary>Show Plan</summary>
+            
+            \`\`\`terraform
+            ${{ env.PLAN }}
+            \`\`\`
+            
+            </details>
+            
+            *Triggered by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ needs.detect-environment.outputs.environment }}
+          path: ${{ needs.detect-environment.outputs.tf_dir }}/tfplan
+          retention-days: 5
