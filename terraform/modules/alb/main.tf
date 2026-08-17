@@ -113,33 +113,41 @@ resource "aws_lb_target_group" "app" {
 }
 
 ###############################################################################
-# ALB Listeners — demonstrates dynamic blocks
+# ALB Listeners — HTTP direct (dev) or HTTP→HTTPS redirect (prod)
 ###############################################################################
 
-# HTTP → HTTPS redirect
+# HTTP listener — forwards directly when no ACM cert, redirects when cert present
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
-    type = "redirect"
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
+    # If no ACM cert provided, forward directly to target group (dev mode)
+    type             = var.acm_certificate_arn == "" ? "forward" : "redirect"
+    target_group_arn = var.acm_certificate_arn == "" ? aws_lb_target_group.app.arn : null
+
+    dynamic "redirect" {
+      for_each = var.acm_certificate_arn != "" ? [1] : []
+      content {
+        port        = "443"
+        protocol    = "HTTPS"
+        status_code = "HTTP_301"
+      }
     }
   }
 
   tags = local.common_tags
 }
 
-# HTTPS listener with ACM certificate
+# HTTPS listener — only created when ACM cert is provided
 resource "aws_lb_listener" "https" {
+  count = var.acm_certificate_arn != "" ? 1 : 0
+
   load_balancer_arn = aws_lb.main.arn
   port              = 443
   protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"  # TLS 1.3 preferred
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn   = var.acm_certificate_arn
 
   default_action {

@@ -1,0 +1,172 @@
+###############################################################################
+# .github/workflows/bootstrap.yml
+# One-time workflow: deploys Terraform backend (S3 + DynamoDB),
+# then deploys the full dev environment — triggered manually
+###############################################################################
+
+name: "Bootstrap & Deploy Dev"
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type DEPLOY to confirm"
+        required: true
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  TF_VERSION: "1.6.6"
+  AWS_REGION: "us-east-1"
+  ACCOUNT_ID: "083846066460"
+
+jobs:
+  ###########################################################################
+  # Step 1 — Deploy Terraform backend (S3 state bucket + DynamoDB lock table)
+  ###########################################################################
+  bootstrap-backend:
+    name: "1 — Bootstrap Terraform Backend"
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'DEPLOY'
+    outputs:
+      state_bucket: ${{ steps.apply.outputs.state_bucket }}
+      lock_table: ${{ steps.apply.outputs.lock_table }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: bootstrap-backend
+
+      - name: Terraform init (local backend)
+        working-directory: terraform/backend
+        run: terraform init -backend=false
+
+      - name: Terraform apply backend
+        id: apply
+        working-directory: terraform/backend
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var="project_name=athennian" \
+            -var="aws_region=us-east-1"
+
+          STATE_BUCKET=$(terraform output -raw state_bucket_name)
+          LOCK_TABLE=$(terraform output -raw lock_table_name)
+
+          echo "state_bucket=$STATE_BUCKET" >> $GITHUB_OUTPUT
+          echo "lock_table=$LOCK_TABLE" >> $GITHUB_OUTPUT
+          echo "State bucket: $STATE_BUCKET"
+          echo "Lock table:   $LOCK_TABLE"
+
+  ###########################################################################
+  # Step 2 — Patch backend config in dev environment with real bucket name
+  ###########################################################################
+  patch-backend-config:
+    name: "2 — Patch Backend Config"
+    runs-on: ubuntu-latest
+    needs: bootstrap-backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update backend bucket in dev main.tf
+        run: |
+          BUCKET="${{ needs.bootstrap-backend.outputs.state_bucket }}"
+          TABLE="${{ needs.bootstrap-backend.outputs.lock_table }}"
+
+          sed -i "s|athennian-terraform-state-ACCOUNT_ID|${BUCKET}|g" \
+            terraform/environments/dev/main.tf
+          sed -i "s|athennian-terraform-locks|${TABLE}|g" \
+            terraform/environments/dev/main.tf
+
+          echo "Updated dev backend config:"
+          grep -A6 'backend "s3"' terraform/environments/dev/main.tf
+
+      - name: Commit patched backend config
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add terraform/environments/dev/main.tf
+          git diff --staged --quiet || git commit -m "ci: patch dev backend config with real bucket name [skip ci]"
+          git push
+
+  ###########################################################################
+  # Step 3 — Deploy dev environment
+  ###########################################################################
+  deploy-dev:
+    name: "3 — Deploy Dev Environment"
+    runs-on: ubuntu-latest
+    needs: patch-backend-config
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main  # get the patched version
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-dev
+
+      - name: Find latest Amazon Linux 2023 AMI
+        id: ami
+        run: |
+          AMI_ID=$(aws ec2 describe-images \
+            --owners amazon \
+            --filters \
+              "Name=name,Values=al2023-ami-2023.*-x86_64" \
+              "Name=state,Values=available" \
+            --query "sort_by(Images, &CreationDate)[-1].ImageId" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          echo "ami_id=$AMI_ID" >> $GITHUB_OUTPUT
+          echo "Using AMI: $AMI_ID"
+
+      - name: Write dev tfvars
+        working-directory: terraform/environments/dev
+        run: |
+          cat > terraform.tfvars << EOF
+          aws_region  = "us-east-1"
+          app_ami_id  = "${{ steps.ami.outputs.ami_id }}"
+          EOF
+          echo "tfvars written:"
+          cat terraform.tfvars
+
+      - name: Terraform init
+        working-directory: terraform/environments/dev
+        run: terraform init
+
+      - name: Terraform plan
+        working-directory: terraform/environments/dev
+        run: terraform plan -var-file="terraform.tfvars" -out=tfplan
+
+      - name: Terraform apply
+        working-directory: terraform/environments/dev
+        run: terraform apply -input=false tfplan
+
+      - name: Print outputs
+        working-directory: terraform/environments/dev
+        run: |
+          echo ""
+          echo "============================================"
+          echo "  Dev Environment Deployed Successfully"
+          echo "============================================"
+          terraform output
