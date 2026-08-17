@@ -30,6 +30,9 @@ jobs:
     name: "1 — Bootstrap Terraform Backend"
     runs-on: ubuntu-latest
     if: github.event.inputs.confirm == 'DEPLOY'
+    permissions:
+      id-token: write
+      contents: write
     outputs:
       state_bucket: ${{ steps.apply.outputs.state_bucket }}
       lock_table: ${{ steps.apply.outputs.lock_table }}
@@ -41,6 +44,17 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
+
+      - name: Debug — decode OIDC token claims
+        run: |
+          # Fetch the OIDC token and decode the payload (no secrets exposed — payload is not sensitive)
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+          # Decode JWT payload (middle section)
+          PAYLOAD=$(echo "$TOKEN" | cut -d'.' -f2 | base64 -d 2>/dev/null || \
+                    echo "$TOKEN" | cut -d'.' -f2 | python3 -c "import sys,base64; d=sys.stdin.read().strip(); print(base64.b64decode(d + '=='*((4-len(d)%4)%4)).decode())")
+          echo "OIDC Token Claims:"
+          echo "$PAYLOAD" | python3 -m json.tool 2>/dev/null || echo "$PAYLOAD"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -76,6 +90,9 @@ jobs:
     name: "2 — Patch Backend Config"
     runs-on: ubuntu-latest
     needs: bootstrap-backend
+    permissions:
+      id-token: write
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -108,6 +125,9 @@ jobs:
     name: "3 — Deploy Dev Environment"
     runs-on: ubuntu-latest
     needs: patch-backend-config
+    permissions:
+      id-token: write
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
