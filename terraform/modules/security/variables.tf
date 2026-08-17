@@ -2,21 +2,48 @@
 # terraform/modules/security/variables.tf
 ###############################################################################
 
-variable "project_name"  { type = string }
-variable "environment"   { type = string }
-variable "aws_region"    { type = string; default = "us-east-1" }
-variable "vpc_id"        { type = string; default = "" }
+variable "project_name" {
+  type = string
+}
+
+variable "environment" {
+  type = string
+}
+
+variable "aws_region" {
+  type    = string
+  default = "us-east-1"
+}
+
+variable "vpc_id" {
+  type    = string
+  default = ""
+}
 
 variable "create_github_oidc" {
   type    = bool
   default = true
 }
 
-variable "github_org"  { type = string; default = "" }
-variable "github_repo" { type = string; default = "" }
+variable "github_org" {
+  type    = string
+  default = ""
+}
 
-variable "terraform_state_bucket" { type = string; default = "" }
-variable "terraform_lock_table"   { type = string; default = "" }
+variable "github_repo" {
+  type    = string
+  default = ""
+}
+
+variable "terraform_state_bucket" {
+  type    = string
+  default = ""
+}
+
+variable "terraform_lock_table" {
+  type    = string
+  default = ""
+}
 
 variable "manage_iam_password_policy" {
   type    = bool
