@@ -160,9 +160,9 @@ resource "aws_lb_listener" "https" {
 
 # Additional listener rules — demonstrates dynamic blocks
 resource "aws_lb_listener_rule" "rules" {
-  for_each = { for idx, rule in var.listener_rules : tostring(idx) => rule }
+  for_each = var.acm_certificate_arn != "" ? { for idx, rule in var.listener_rules : tostring(idx) => rule } : {}
 
-  listener_arn = aws_lb_listener.https.arn
+  listener_arn = aws_lb_listener.https[0].arn
   priority     = each.value.priority
 
   dynamic "action" {
