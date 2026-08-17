@@ -238,6 +238,12 @@ jobs:
             tf_import "module.ec2.aws_iam_instance_profile.app" "athennian-dev-app-profile"
           fi
 
+          # OIDC provider (may exist in AWS but not in state)
+          OIDC_ARN="arn:aws:iam::${{ env.ACCOUNT_ID }}:oidc-provider/token.actions.githubusercontent.com"
+          if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_ARN" 2>/dev/null; then
+            tf_import "module.security.aws_iam_openid_connect_provider.github[0]" "$OIDC_ARN"
+          fi
+
           echo "Import step complete."
 
       - name: Terraform plan

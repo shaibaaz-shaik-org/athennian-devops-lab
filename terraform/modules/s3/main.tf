@@ -69,7 +69,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "buckets" {
   for_each = { for k, v in var.buckets : k => v if v.lifecycle_enabled }
 
   bucket = aws_s3_bucket.buckets[each.key].id
-  
+
   depends_on = [aws_s3_bucket_versioning.buckets]
 
   rule {
@@ -90,8 +90,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "buckets" {
       days = each.value.expiration_days
     }
 
-    noncurrent_version_expiration {
-      noncurrent_days = 30
+    dynamic "noncurrent_version_expiration" {
+      for_each = each.value.versioning ? [1] : []
+      content {
+        noncurrent_days = 30
+      }
     }
   }
 }
@@ -106,14 +109,32 @@ resource "aws_s3_bucket_logging" "buckets" {
 }
 
 # Enforce HTTPS-only access via bucket policy
+# For ALB log buckets, also allow ELB delivery service to put objects
 resource "aws_s3_bucket_policy" "enforce_tls" {
   for_each = var.buckets
 
   bucket = aws_s3_bucket.buckets[each.key].id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
+    Statement = concat(
+      # Allow ELB access log delivery (only for log-type buckets)
+      each.value.type == "logs" ? [{
+        Sid       = "AllowELBAccessLogs"
+        Effect    = "Allow"
+        Principal = { Service = "delivery.logs.amazonaws.com" }
+        Action    = "s3:PutObject"
+        Resource  = "${aws_s3_bucket.buckets[each.key].arn}/AWSLogs/*"
+        Condition = {
+          StringEquals = { "s3:x-amz-acl" = "bucket-owner-full-control" }
+        }
+      }, {
+        Sid       = "AllowELBGetBucketAcl"
+        Effect    = "Allow"
+        Principal = { Service = "delivery.logs.amazonaws.com" }
+        Action    = "s3:GetBucketAcl"
+        Resource  = aws_s3_bucket.buckets[each.key].arn
+      }] : [],
+      [{
         Sid       = "DenyHTTP"
         Effect    = "Deny"
         Principal = "*"
@@ -125,8 +146,8 @@ resource "aws_s3_bucket_policy" "enforce_tls" {
         Condition = {
           Bool = { "aws:SecureTransport" = "false" }
         }
-      }
-    ]
+      }]
+    )
   })
 
   depends_on = [aws_s3_bucket_public_access_block.buckets]
