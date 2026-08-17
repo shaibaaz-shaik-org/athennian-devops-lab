@@ -10,7 +10,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "athennian-terraform-state-ACCOUNT_ID"
+    bucket         = "athennian-terraform-state-083846066460"
     key            = "dev/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "athennian-terraform-locks"
