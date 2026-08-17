@@ -2,10 +2,21 @@
 # terraform/modules/s3/variables.tf
 ###############################################################################
 
-variable "project_name" { type = string }
-variable "environment"  { type = string }
-variable "account_id"   { type = string }
-variable "kms_key_arn"  { type = string }
+variable "project_name" {
+  type = string
+}
+
+variable "environment" {
+  type = string
+}
+
+variable "account_id" {
+  type = string
+}
+
+variable "kms_key_arn" {
+  type = string
+}
 
 variable "buckets" {
   description = "Map of S3 buckets to create"
