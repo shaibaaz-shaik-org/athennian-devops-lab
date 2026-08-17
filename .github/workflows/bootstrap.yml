@@ -71,6 +71,32 @@ jobs:
         id: apply
         working-directory: terraform/backend
         run: |
+          # Import existing resources if they already exist (idempotent re-runs)
+          BUCKET_NAME="athennian-terraform-state-083846066460"
+          TABLE_NAME="athennian-terraform-locks"
+          KEY_ALIAS="alias/athennian-terraform-state"
+
+          if aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "Bucket exists — importing into state..."
+            terraform import -var="project_name=athennian" -var="aws_region=us-east-1" \
+              aws_s3_bucket.terraform_state "$BUCKET_NAME" 2>/dev/null || true
+          fi
+
+          if aws dynamodb describe-table --table-name "$TABLE_NAME" 2>/dev/null; then
+            echo "DynamoDB table exists — importing into state..."
+            terraform import -var="project_name=athennian" -var="aws_region=us-east-1" \
+              aws_dynamodb_table.terraform_locks "$TABLE_NAME" 2>/dev/null || true
+          fi
+
+          KEY_ID=$(aws kms list-aliases --query "Aliases[?AliasName=='$KEY_ALIAS'].TargetKeyId" --output text 2>/dev/null || echo "")
+          if [ -n "$KEY_ID" ] && [ "$KEY_ID" != "None" ]; then
+            echo "KMS key exists — importing into state..."
+            terraform import -var="project_name=athennian" -var="aws_region=us-east-1" \
+              aws_kms_key.terraform_state "$KEY_ID" 2>/dev/null || true
+            terraform import -var="project_name=athennian" -var="aws_region=us-east-1" \
+              aws_kms_alias.terraform_state "$KEY_ALIAS" 2>/dev/null || true
+          fi
+
           terraform apply -auto-approve -input=false \
             -var="project_name=athennian" \
             -var="aws_region=us-east-1"
