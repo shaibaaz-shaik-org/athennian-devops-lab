@@ -204,42 +204,51 @@ jobs:
         working-directory: terraform/environments/dev
         run: |
           ACCT="${{ env.ACCOUNT_ID }}"
-          REGION="${{ env.AWS_REGION }}"
 
-          import_if_exists() {
-            local addr="$1"; local id="$2"
-            terraform import -var-file="terraform.tfvars" "$addr" "$id" 2>&1 | tail -1 || true
+          tf_import() {
+            # Single-quote the address so bash doesn't split on the embedded double-quotes
+            local addr=$1; local id=$2
+            echo "  Importing $addr ..."
+            terraform import -var-file="terraform.tfvars" "$addr" "$id" 2>&1 || true
           }
 
-          # S3 buckets (may exist from partial previous apply)
+          # S3 buckets
           for bucket in app-data alb-logs backups access-logs; do
             NAME="athennian-dev-${bucket}-${ACCT}"
             if aws s3api head-bucket --bucket "$NAME" 2>/dev/null; then
-              import_if_exists "module.s3.aws_s3_bucket.buckets[\"${bucket}\"]" "$NAME"
+              tf_import "module.s3.aws_s3_bucket.buckets[\"${bucket}\"]" "$NAME"
             fi
           done
 
-          # KMS aliases (keys are in state, aliases may not be)
+          # KMS aliases (keys may already be in state; || true skips duplicates)
           for k in app ebs s3 secrets; do
             ALIAS="alias/athennian-dev-${k}"
-            KEY=$(aws kms list-aliases --query "Aliases[?AliasName=='${ALIAS}'].TargetKeyId" --output text 2>/dev/null || true)
+            KEY=$(aws kms list-aliases \
+              --query "Aliases[?AliasName=='${ALIAS}'].TargetKeyId" \
+              --output text 2>/dev/null || true)
             if [ -n "$KEY" ] && [ "$KEY" != "None" ]; then
-              # Import the KMS key first (in case not in state)
-              import_if_exists "module.security.aws_kms_key.keys[\"${k}\"]" "$KEY"
-              import_if_exists "module.security.aws_kms_alias.keys[\"${k}\"]" "$ALIAS"
+              tf_import "module.security.aws_kms_key.keys[\"${k}\"]" "$KEY"
+              tf_import "module.security.aws_kms_alias.keys[\"${k}\"]" "$ALIAS"
             fi
           done
 
           # ELB target group
-          TG_ARN=$(aws elbv2 describe-target-groups --names "athennian-dev-tg" \
-            --query "TargetGroups[0].TargetGroupArn" --output text 2>/dev/null || echo "")
+          TG_ARN=$(aws elbv2 describe-target-groups \
+            --names "athennian-dev-tg" \
+            --query "TargetGroups[0].TargetGroupArn" \
+            --output text 2>/dev/null || echo "")
           if [ -n "$TG_ARN" ] && [ "$TG_ARN" != "None" ]; then
-            import_if_exists "module.alb.aws_lb_target_group.app" "$TG_ARN"
+            tf_import "module.alb.aws_lb_target_group.app" "$TG_ARN"
           fi
 
-          # IAM role for EC2 instances
+          # IAM role for EC2
           if aws iam get-role --role-name "athennian-dev-app-role" 2>/dev/null; then
-            import_if_exists "module.ec2.aws_iam_role.app" "athennian-dev-app-role"
+            tf_import "module.ec2.aws_iam_role.app" "athennian-dev-app-role"
+          fi
+
+          # IAM instance profile (new orphan)
+          if aws iam get-instance-profile --instance-profile-name "athennian-dev-app-profile" 2>/dev/null; then
+            tf_import "module.ec2.aws_iam_instance_profile.app" "athennian-dev-app-profile"
           fi
 
           echo "Import step complete."
