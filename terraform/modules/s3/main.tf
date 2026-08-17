@@ -76,6 +76,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "buckets" {
     id     = "transition-and-expire"
     status = "Enabled"
 
+    filter {}  # Apply to all objects in bucket
+
     transition {
       days          = each.value.transition_to_ia_days
       storage_class = "STANDARD_IA"
@@ -114,40 +116,46 @@ resource "aws_s3_bucket_policy" "enforce_tls" {
   for_each = var.buckets
 
   bucket = aws_s3_bucket.buckets[each.key].id
-  policy = jsonencode({
+
+  policy = each.value.type == "logs" ? jsonencode({
     Version = "2012-10-17"
-    Statement = concat(
-      # Allow ELB access log delivery (only for log-type buckets)
-      each.value.type == "logs" ? [{
+    Statement = [
+      {
         Sid       = "AllowELBAccessLogs"
         Effect    = "Allow"
         Principal = { Service = "delivery.logs.amazonaws.com" }
         Action    = "s3:PutObject"
         Resource  = "${aws_s3_bucket.buckets[each.key].arn}/AWSLogs/*"
-        Condition = {
-          StringEquals = { "s3:x-amz-acl" = "bucket-owner-full-control" }
-        }
-      }, {
+        Condition = { StringEquals = { "s3:x-amz-acl" = "bucket-owner-full-control" } }
+      },
+      {
         Sid       = "AllowELBGetBucketAcl"
         Effect    = "Allow"
         Principal = { Service = "delivery.logs.amazonaws.com" }
         Action    = "s3:GetBucketAcl"
         Resource  = aws_s3_bucket.buckets[each.key].arn
-      }] : [],
-      [{
+      },
+      {
         Sid       = "DenyHTTP"
         Effect    = "Deny"
-        Principal = "*"
+        Principal = { AWS = "*" }
         Action    = "s3:*"
-        Resource = [
-          aws_s3_bucket.buckets[each.key].arn,
-          "${aws_s3_bucket.buckets[each.key].arn}/*"
-        ]
-        Condition = {
-          Bool = { "aws:SecureTransport" = "false" }
-        }
-      }]
-    )
+        Resource  = [aws_s3_bucket.buckets[each.key].arn, "${aws_s3_bucket.buckets[each.key].arn}/*"]
+        Condition = { Bool = { "aws:SecureTransport" = "false" } }
+      }
+    ]
+  }) : jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "DenyHTTP"
+        Effect    = "Deny"
+        Principal = { AWS = "*" }
+        Action    = "s3:*"
+        Resource  = [aws_s3_bucket.buckets[each.key].arn, "${aws_s3_bucket.buckets[each.key].arn}/*"]
+        Condition = { Bool = { "aws:SecureTransport" = "false" } }
+      }
+    ]
   })
 
   depends_on = [aws_s3_bucket_public_access_block.buckets]
