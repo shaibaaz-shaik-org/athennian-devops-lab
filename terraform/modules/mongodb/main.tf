@@ -40,7 +40,7 @@ locals {
 
 resource "aws_security_group" "mongodb" {
   name        = "${var.project_name}-${var.environment}-mongodb-sg"
-  description = "MongoDB — only reachable from application tier"
+  description = "MongoDB - only reachable from application tier"
   vpc_id      = var.vpc_id
 
   ingress {

@@ -16,7 +16,7 @@ locals {
 
 resource "aws_security_group" "alb" {
   name        = "${var.project_name}-${var.environment}-alb-sg"
-  description = "Security group for ALB — public HTTPS/HTTP ingress only"
+  description = "Security group for ALB - public HTTPS/HTTP ingress only"
   vpc_id      = var.vpc_id
 
   ingress {

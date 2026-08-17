@@ -15,6 +15,7 @@ terraform {
     region         = "us-east-1"
     dynamodb_table = "athennian-terraform-locks"
     encrypt        = true
+    kms_key_id     = "arn:aws:kms:us-east-1:083846066460:key/2bb44672-a1ff-46e8-b58c-e971bc5868fd"
   }
 }
 
@@ -37,10 +38,11 @@ locals {
 }
 
 module "security" {
-  source       = "../../modules/security"
-  project_name = "athennian"
-  environment  = local.environment
-  tags         = local.common_tags
+  source               = "../../modules/security"
+  project_name         = "athennian"
+  environment          = local.environment
+  create_github_oidc   = false   # OIDC provider already created manually
+  tags                 = local.common_tags
 }
 
 module "vpc" {

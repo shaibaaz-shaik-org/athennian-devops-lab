@@ -32,8 +32,8 @@ variable "buckets" {
       type                  = "logs"
       versioning            = false
       lifecycle_enabled     = true
-      transition_to_ia_days = 7
-      transition_to_glacier_days = 30
+      transition_to_ia_days = 30
+      transition_to_glacier_days = 90
       expiration_days       = 90
       enable_access_logging = false
     }
