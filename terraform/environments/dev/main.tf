@@ -41,7 +41,7 @@ module "security" {
   source               = "../../modules/security"
   project_name         = "athennian"
   environment          = local.environment
-  create_github_oidc   = false   # OIDC provider already created manually
+  create_github_oidc   = true   # managed by terraform in dev
   tags                 = local.common_tags
 }
 
